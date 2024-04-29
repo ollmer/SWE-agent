@@ -18,5 +18,6 @@ dependencies:
     - unidiff
     - simple-parsing
     - together>=1.1.0 # Versions of together below 1.1.0 are not compatible. see https://github.com/princeton-nlp/SWE-agent/issues/135
+    - transformers
     - ollama
     - rich-argparse

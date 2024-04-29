@@ -630,7 +630,7 @@ class TogetherModel(BaseModel):
             "cost_per_output_token": 9e-07,
         },
         "deepseek-ai/deepseek-coder-33b-instruct": {
-            "max_context": 16384,
+            "max_context": 16000,
             "cost_per_input_token": 8e-07,
             "cost_per_output_token": 8e-07,
         },
@@ -676,6 +676,9 @@ class TogetherModel(BaseModel):
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         self.tokenizer = AutoTokenizer.from_pretrained(self.TOKENIZERS[self.args.model_name])
 
+    def count_tokens(self, text: str) -> int:
+        return len(self.tokenizer.encode(text))
+
     def history_to_messages(
         self, history: list[dict[str, str]], is_demonstration: bool = False
     ) -> str:
@@ -699,7 +702,7 @@ class TogetherModel(BaseModel):
         #     tokenize=False
         # )
 
-        tokens_length = len(self.tokenizer.encode(prompt))
+        tokens_length = self.count_tokens(prompt)
         max_prompt_length = self.model_metadata["max_context"] - 256
         while tokens_length > max_prompt_length:
             trim_propotion = 1 - max_prompt_length / tokens_length
@@ -711,8 +714,8 @@ class TogetherModel(BaseModel):
             logger.warning(f"Remained messages: {len(prompt_lines)}")
             prompt = "\n".join(prompt_lines)
             prompt = f"{prompt}\n<bot>:"
-            tokens_length = len(self.tokenizer.encode(prompt))
-        logger.info(f"Prompt length: {tokens_length} tokens")
+            tokens_length = self.count_tokens(prompt)
+        logger.debug(f"Prompt length {tokens_length} tokens")
         return prompt
 
     @retry(
@@ -727,8 +730,7 @@ class TogetherModel(BaseModel):
         """
         # Perform Together API call
         prompt = self.history_to_messages(history)
-        # Anthropic's count_tokens is convenient because it caches and utilizes huggingface/tokenizers, so we will use.
-        max_tokens_to_sample = self.model_metadata["max_context"] - Anthropic().count_tokens(prompt)
+        max_tokens_to_sample = self.model_metadata["max_context"] - self.count_tokens(prompt)
         completion = together.Complete.create(
             model=self.api_model,
             prompt=prompt,
