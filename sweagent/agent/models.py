@@ -8,8 +8,10 @@ from collections import defaultdict
 from anthropic import Anthropic, AnthropicBedrock, HUMAN_PROMPT, AI_PROMPT
 from dataclasses import dataclass, fields
 from openai import BadRequestError, OpenAI, AzureOpenAI
+from rich.logging import RichHandler
 from simple_parsing.helpers.serialization.serializable import FrozenSerializable, Serializable
 from sweagent.agent.commands import Command
+from transformers import AutoTokenizer
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -18,7 +20,13 @@ from tenacity import (
 )
 from typing import Optional, Union
 
+handler = RichHandler(show_time=False, show_path=False)
+handler.setLevel(logging.DEBUG)
 logger = logging.getLogger("api_models")
+logger.setLevel(logging.DEBUG)
+logger.addHandler(handler)
+logger.propagate = False
+logging.getLogger("simple_parsing").setLevel(logging.WARNING)
 
 
 @dataclass(frozen=True)
@@ -616,6 +624,16 @@ class TogetherModel(BaseModel):
             "cost_per_input_token": 9e-07,
             "cost_per_output_token": 9e-07,
         },
+        "meta-llama/Llama-3-70b-chat-hf": {
+            "max_context": 8192,
+            "cost_per_input_token": 9e-07,
+            "cost_per_output_token": 9e-07,
+        },
+        "deepseek-ai/deepseek-coder-33b-instruct": {
+            "max_context": 16384,
+            "cost_per_input_token": 8e-07,
+            "cost_per_output_token": 8e-07,
+        },
         "mistralai/Mistral-7B-Instruct-v0.2": {
             "max_context": 32768,
             "cost_per_input_token": 2e-07,
@@ -634,11 +652,18 @@ class TogetherModel(BaseModel):
     }
 
     SHORTCUTS = {
+        "llama3": "meta-llama/Llama-3-70b-chat-hf",
+        "deepseek":"deepseek-ai/deepseek-coder-33b-instruct",
         "llama13b": "meta-llama/Llama-2-13b-chat-hf",
         "llama70b": "meta-llama/Llama-2-70b-chat-hf",
         "mistral7b": "mistralai/Mistral-7B-Instruct-v0.2",
         "mixtral8x7b": "mistralai/Mixtral-8x7B-Instruct-v0.1",
         "redpajama7b": "togethercomputer/RedPajama-INCITE-7B-Chat",
+    }
+
+    TOKENIZERS = {
+        "llama3": "meta-llama/Meta-Llama-3-70B-Instruct",
+        "deepseek": "deepseek-ai/deepseek-coder-33b-instruct"
     }
 
     def __init__(self, args: ModelArguments, commands: list[Command]):
@@ -647,7 +672,9 @@ class TogetherModel(BaseModel):
 
         # Set Together key
         cfg = config.Config(os.path.join(os.getcwd(), "keys.cfg"))
-        together.api_key = cfg.TOGETHER_API_KEY
+        os.environ["TOGETHER_API_KEY"] = cfg.TOGETHER_API_KEY
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        self.tokenizer = AutoTokenizer.from_pretrained(self.TOKENIZERS[self.args.model_name])
 
     def history_to_messages(
         self, history: list[dict[str, str]], is_demonstration: bool = False
@@ -660,9 +687,32 @@ class TogetherModel(BaseModel):
             history = [entry for entry in history if entry["role"] != "system"]
         # Map history to TogetherAI format
         mapping = {"user": "human", "assistant": "bot", "system": "bot"}
-        prompt = [f'<{mapping[d["role"]]}>: {d["content"]}' for d in history]
-        prompt = "\n".join(prompt)
+        prompt_lines = [f'<{mapping[d["role"]]}>: {d["content"]}' for d in history]
+        prompt = "\n".join(prompt_lines)
         prompt = f"{prompt}\n<bot>:"
+
+        # TODO: debug new prompt building
+        # messages = [{"role": d["role"], "content": d["content"]} for d in history]
+        # prompt = self.tokenizer.apply_chat_template(
+        #     messages,
+        #     add_generation_prompt=True,
+        #     tokenize=False
+        # )
+
+        tokens_length = len(self.tokenizer.encode(prompt))
+        max_prompt_length = self.model_metadata["max_context"] - 256
+        while tokens_length > max_prompt_length:
+            trim_propotion = 1 - max_prompt_length / tokens_length
+            messages_to_trim = max(1, int(trim_propotion * len(prompt_lines)))
+            logger.warning(f"Exceeded prompt length: {tokens_length} of {max_prompt_length} tokens, proportion {trim_propotion:.2f}")
+            logger.warning(f"Trimming {messages_to_trim} of {len(prompt_lines)} messages to fit context window", )
+            ## keep first 3 messages
+            prompt_lines = prompt_lines[:3] + prompt_lines[3 + messages_to_trim:]
+            logger.warning(f"Remained messages: {len(prompt_lines)}")
+            prompt = "\n".join(prompt_lines)
+            prompt = f"{prompt}\n<bot>:"
+            tokens_length = len(self.tokenizer.encode(prompt))
+        logger.info(f"Prompt length: {tokens_length} tokens")
         return prompt
 
     @retry(
